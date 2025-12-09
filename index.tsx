@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { createRoot } from "react-dom/client";
+import { GoogleGenAI } from "@google/genai";
 import {
   LineChart,
   Line,
@@ -68,11 +69,16 @@ const ReagentCalculator = () => {
   const [concentration, setConcentration] = useState("0.10");
   const [result, setResult] = useState<any>(null);
 
+  // AI 搜尋狀態
+  const [isSearching, setIsSearching] = useState(false);
+  const [sources, setSources] = useState<{uri: string, title: string}[]>([]);
+
   // 當使用者輸入或選擇名稱時
   const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setChemName(val);
     setResult(null);
+    setSources([]); // 清除舊的來源
 
     // 嘗試從預設清單中尋找是否有符合的化合物，若有則自動填入 MW
     const found = CHEMICALS.find(c => c.name === val);
@@ -81,14 +87,53 @@ const ReagentCalculator = () => {
     }
   };
 
-  const handleSearchInfo = () => {
+  const handleAiSearch = async () => {
     if (!chemName.trim()) {
       alert("請先輸入化合物名稱");
       return;
     }
-    // 搜尋查詢字串：名稱 + 摩爾質量
-    const query = `${chemName} 摩爾質量 molecular weight`;
-    window.open(`https://www.google.com/search?q=${encodeURIComponent(query)}`, '_blank');
+    
+    setIsSearching(true);
+    setSources([]);
+
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: `What is the molar mass (molecular weight) of ${chemName}? Please provide only the numeric value in g/mol. Do not include any text explanation.`,
+        config: {
+          tools: [{ googleSearch: {} }],
+        },
+      });
+
+      const text = response.text;
+      if (text) {
+        // Simple heuristic: extract the first number found (e.g., 58.44 from "58.44 g/mol")
+        const match = text.match(/(\d+(\.\d+)?)/);
+        if (match) {
+          setMw(match[0]);
+          setResult(null); // Reset calculation
+        }
+      }
+
+      // Extract grounding sources
+      const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+      if (chunks) {
+         const uniqueSources = new Map();
+         chunks.forEach((c: any) => {
+           if (c.web) {
+             uniqueSources.set(c.web.uri, c.web);
+           }
+         });
+         setSources(Array.from(uniqueSources.values()));
+      }
+
+    } catch (error) {
+      console.error("AI Search Error", error);
+      alert("自動搜尋失敗，請檢查網路連線或稍後再試。");
+    } finally {
+      setIsSearching(false);
+    }
   };
 
   const calculate = () => {
@@ -142,24 +187,29 @@ const ReagentCalculator = () => {
       <div className="form-grid">
         <div className="form-group">
           <label>化合物名稱 (可自訂)</label>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <input 
-              list="chem-list" 
-              value={chemName} 
-              onChange={handleNameChange} 
-              placeholder="輸入或選擇化合物"
-              style={{ flex: 1 }}
-            />
-            <button 
-              type="button" 
-              className="btn-outline" 
-              onClick={handleSearchInfo}
-              title="在 Google 搜尋此化合物的摩爾質量"
-              style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}
-            >
-              🔍 查資料
-            </button>
-          </div>
+          <input 
+            list="chem-list" 
+            value={chemName} 
+            onChange={handleNameChange} 
+            placeholder="例如: NaCl, 或輸入中文名稱"
+            style={{ width: '100%' }}
+          />
+          
+          {sources.length > 0 && (
+            <div style={{ marginTop: '8px', fontSize: '0.8rem', backgroundColor: '#f0f9ff', padding: '8px', borderRadius: '4px' }}>
+              <div style={{ fontWeight: 'bold', color: '#0369a1', marginBottom: '4px' }}>資料來源 (Google Search)：</div>
+              <ul style={{ margin: 0, paddingLeft: '20px', color: '#4b5563' }}>
+                {sources.map((s, idx) => (
+                  <li key={idx}>
+                    <a href={s.uri} target="_blank" rel="noopener noreferrer" style={{ color: '#0284c7', textDecoration: 'none' }}>
+                      {s.title}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          
           <datalist id="chem-list">
             {CHEMICALS.map((c, i) => (
               <option key={i} value={c.name} />
@@ -169,16 +219,29 @@ const ReagentCalculator = () => {
         
         <div className="form-group">
           <label>摩爾質量 MW (g/mol)</label>
-          <input 
-            type="number" 
-            step="0.01"
-            value={mw} 
-            onChange={(e) => {
-              setMw(e.target.value);
-              setResult(null);
-            }} 
-            placeholder="自訂請輸入 MW"
-          />
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button 
+              type="button" 
+              className="btn-primary" 
+              onClick={handleAiSearch}
+              disabled={isSearching}
+              title="使用 AI 自動查找 MW"
+              style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}
+            >
+              {isSearching ? '⏳' : '✨'}
+            </button>
+            <input 
+              type="number" 
+              step="0.01"
+              value={mw} 
+              onChange={(e) => {
+                setMw(e.target.value);
+                setResult(null);
+              }} 
+              placeholder="MW"
+              style={{ flex: 1 }}
+            />
+          </div>
         </div>
 
         <div className="form-group">
