@@ -32,6 +32,9 @@ interface ExperimentRecord {
   notes: string;
 }
 
+// 後端 API 基底路徑，優先讀取 .env.local 的 VITE_API_BASE_URL
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8080";
+
 type SortKey = keyof ExperimentRecord | "anodeDelta" | "cathodeDelta";
 type SortDirection = "asc" | "desc";
 
@@ -338,6 +341,10 @@ const App = () => {
   // --- State 管理 ---
   const [records, setRecords] = useState<ExperimentRecord[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
+
+  // 後端載入狀態與錯誤訊息（用於提醒連線問題）
+  const [isLoading, setIsLoading] = useState(false);
+  const [apiError, setApiError] = useState<string | null>(null);
   
   // 進階功能 State
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -362,24 +369,93 @@ const App = () => {
 
   const [formData, setFormData] = useState(initialFormState);
 
-  // --- useEffect: 載入與儲存 ---
+  // --- 後端 API 工具函式 ---
 
-  // 1. 初始化時從 localStorage 讀取
-  useEffect(() => {
-    const savedData = localStorage.getItem("carbon_experiment_data");
-    if (savedData) {
-      try {
-        setRecords(JSON.parse(savedData));
-      } catch (e) {
-        console.error("無法解析儲存的資料", e);
+  // 共用的錯誤提示：將訊息顯示在 console 並彈出 alert
+  const handleApiError = (action: string, error: unknown) => {
+    console.error(action, error);
+    setApiError(action);
+    alert(`${action}，請確認後端服務是否啟動或網路狀態是否正常。`);
+  };
+
+  // 從後端載入資料（取代 localStorage）
+  const fetchRecordsFromApi = async () => {
+    setIsLoading(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/records`);
+      if (!response.ok) {
+        throw new Error(`Server responded ${response.status}`);
       }
+      const data = await response.json();
+      setRecords(data);
+      setApiError(null);
+    } catch (error) {
+      handleApiError("載入資料失敗", error);
+    } finally {
+      setIsLoading(false);
     }
-  }, []);
+  };
 
-  // 2. 當 records 變動時，寫入 localStorage
+  // 新增紀錄的 API 呼叫
+  const createRecord = async (payload: Omit<ExperimentRecord, "id" | "timestamp">) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/records`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        throw new Error(`Server responded ${response.status}`);
+      }
+      const saved = await response.json();
+      return saved as ExperimentRecord;
+    } catch (error) {
+      handleApiError("新增紀錄失敗", error);
+      throw error;
+    }
+  };
+
+  // 更新紀錄的 API 呼叫
+  const updateRecordApi = async (
+    id: string,
+    payload: Omit<ExperimentRecord, "id" | "timestamp">
+  ) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/records/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        throw new Error(`Server responded ${response.status}`);
+      }
+      const saved = await response.json();
+      return saved as ExperimentRecord;
+    } catch (error) {
+      handleApiError("更新紀錄失敗", error);
+      throw error;
+    }
+  };
+
+  // 刪除紀錄的 API 呼叫
+  const deleteRecordApi = async (id: string) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/records/${id}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) {
+        throw new Error(`Server responded ${response.status}`);
+      }
+    } catch (error) {
+      handleApiError("刪除紀錄失敗", error);
+      throw error;
+    }
+  };
+
+  // 首次載入時向後端取資料
   useEffect(() => {
-    localStorage.setItem("carbon_experiment_data", JSON.stringify(records));
-  }, [records]);
+    fetchRecordsFromApi();
+  }, []);
 
   // --- 輔助函式 ---
 
@@ -514,7 +590,7 @@ const App = () => {
   };
 
   // 新增或更新紀錄
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
     // 檢查是否有錯誤
@@ -529,25 +605,27 @@ const App = () => {
       return;
     }
 
+    const payload = { ...formData };
+
     if (editingId) {
-      // 更新現有紀錄
-      setRecords((prev) =>
-        prev.map((rec) =>
-          rec.id === editingId
-            ? { ...rec, ...formData, timestamp: new Date().toISOString() }
-            : rec
-        )
-      );
-      setEditingId(null);
-      alert("紀錄已更新");
+      // 更新現有紀錄：送到後端後，再以回傳資料更新畫面
+      try {
+        const updated = await updateRecordApi(editingId, payload);
+        setRecords((prev) => prev.map((rec) => (rec.id === editingId ? updated : rec)));
+        setEditingId(null);
+        alert("紀錄已更新");
+      } catch (error) {
+        // 錯誤已由 handleApiError 處理
+        return;
+      }
     } else {
-      // 新增紀錄
-      const newRecord: ExperimentRecord = {
-        id: crypto.randomUUID(), // 生成唯一 ID
-        timestamp: new Date().toISOString(),
-        ...formData,
-      };
-      setRecords((prev) => [newRecord, ...prev]); // 新的在最上面
+      // 新增紀錄：以伺服器生成的 ID/timestamp 為準
+      try {
+        const saved = await createRecord(payload);
+        setRecords((prev) => [saved, ...prev]);
+      } catch (error) {
+        return;
+      }
     }
 
     // 重置表單
@@ -579,14 +657,19 @@ const App = () => {
   };
 
   // 刪除單筆
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     if (confirm("確定要刪除這筆紀錄嗎？")) {
-      setRecords((prev) => prev.filter((r) => r.id !== id));
-      setSelectedIds(prev => {
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
+      try {
+        await deleteRecordApi(id);
+        setRecords((prev) => prev.filter((r) => r.id !== id));
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      } catch (error) {
+        // 失敗時保留原資料
+      }
     }
   };
 
@@ -610,76 +693,101 @@ const App = () => {
   };
 
   // 批次刪除
-  const handleBulkDelete = () => {
+  const handleBulkDelete = async () => {
     if (confirm(`確定要刪除選取的 ${selectedIds.size} 筆紀錄嗎？`)) {
-      setRecords(prev => prev.filter(r => !selectedIds.has(r.id)));
-      setSelectedIds(new Set());
+      try {
+        await Promise.all(Array.from(selectedIds).map((id) => deleteRecordApi(id)));
+        setRecords((prev) => prev.filter((r) => !selectedIds.has(r.id)));
+        setSelectedIds(new Set());
+      } catch (error) {
+        // 錯誤處理已在 deleteRecordApi 完成
+      }
     }
   };
 
-  // 匯出功能 (支援全部或選取)
-  const handleExportCSV = (onlySelected = false) => {
-    const targets = onlySelected 
-      ? records.filter(r => selectedIds.has(r.id))
-      : records;
+  // 匯出功能：優先呼叫後端 CSV 下載；選取匯出則在前端組 CSV
+  const handleExportCSV = async (onlySelected = false) => {
+    if (onlySelected) {
+      const targets = records.filter((r) => selectedIds.has(r.id));
+      if (targets.length === 0) {
+        alert("沒有資料可匯出");
+        return;
+      }
 
-    if (targets.length === 0) {
-      alert("沒有資料可匯出");
+      const headers = [
+        "日期時間",
+        "實驗編號",
+        "模式",
+        "設定電壓(V)",
+        "設定電流(A)",
+        "電解液",
+        "陽極初始(g)",
+        "陽極結束(g)",
+        "陽極變化(g)",
+        "陰極初始(g)",
+        "陰極結束(g)",
+        "陰極變化(g)",
+        "備註",
+      ];
+
+      const csvContent = targets.map((r) => {
+        const anodeDelta = formatDelta(calculateDelta(r.anodeInitial, r.anodeFinal));
+        const cathodeDelta = formatDelta(calculateDelta(r.cathodeInitial, r.cathodeFinal));
+
+        return [
+          r.date,
+          `"${r.experimentId}"`,
+          r.mode,
+          r.voltage,
+          r.current,
+          `"${r.electrolyte}"`,
+          r.anodeInitial,
+          r.anodeFinal,
+          anodeDelta,
+          r.cathodeInitial,
+          r.cathodeFinal,
+          cathodeDelta,
+          `"${r.notes.replace(/"/g, '""')}"`,
+        ].join(",");
+      });
+
+      const csvString = "\ufeff" + [headers.join(","), ...csvContent].join("\n");
+      const blob = new Blob([csvString], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `碳棒實驗紀錄_Selected_${new Date().toISOString().slice(0, 10)}.csv`;
+      link.click();
+      URL.revokeObjectURL(url);
       return;
     }
 
-    const headers = [
-      "日期時間",
-      "實驗編號",
-      "模式",
-      "設定電壓(V)",
-      "設定電流(A)",
-      "電解液",
-      "陽極初始(g)",
-      "陽極結束(g)",
-      "陽極變化(g)",
-      "陰極初始(g)",
-      "陰極結束(g)",
-      "陰極變化(g)",
-      "備註",
-    ];
-
-    const csvContent = targets.map((r) => {
-      const anodeDelta = formatDelta(calculateDelta(r.anodeInitial, r.anodeFinal));
-      const cathodeDelta = formatDelta(calculateDelta(r.cathodeInitial, r.cathodeFinal));
-
-      return [
-        r.date,
-        `"${r.experimentId}"`,
-        r.mode,
-        r.voltage,
-        r.current,
-        `"${r.electrolyte}"`,
-        r.anodeInitial,
-        r.anodeFinal,
-        anodeDelta,
-        r.cathodeInitial,
-        r.cathodeFinal,
-        cathodeDelta,
-        `"${r.notes.replace(/"/g, '""')}"`,
-      ].join(",");
-    });
-
-    const csvString = "\ufeff" + [headers.join(","), ...csvContent].join("\n");
-    const blob = new Blob([csvString], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `碳棒實驗紀錄_${onlySelected ? 'Selected' : 'All'}_${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+    try {
+      const response = await fetch(`${API_BASE_URL}/records/export`);
+      if (!response.ok) {
+        throw new Error(`Server responded ${response.status}`);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `experiment-records-${new Date().toISOString().slice(0, 10)}.csv`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      handleApiError("下載 CSV 失敗", error);
+    }
   };
 
-  const handleClearAll = () => {
+  const handleClearAll = async () => {
     if (confirm("警告：這將刪除所有實驗數據且無法復原！確定要繼續嗎？")) {
-      setRecords([]);
-      setSelectedIds(new Set());
-      localStorage.removeItem("carbon_experiment_data");
+      try {
+        await Promise.all(records.map((r) => deleteRecordApi(r.id)));
+        setRecords([]);
+        setSelectedIds(new Set());
+      } catch (error) {
+        // 若刪除未完成，狀態維持原樣方便重試
+      }
     }
   };
 
@@ -705,6 +813,18 @@ const App = () => {
           </button>
         </div>
       </div>
+
+      {/* 後端狀態提示：載入中或錯誤時提醒使用者 */}
+      {isLoading && (
+        <div className="card" style={{ backgroundColor: "#f0f9ff", borderLeft: "4px solid #0ea5e9" }}>
+          正在向後端讀取資料...
+        </div>
+      )}
+      {apiError && (
+        <div className="card" style={{ backgroundColor: "#fef2f2", borderLeft: "4px solid #dc2626", color: "#991b1b" }}>
+          {apiError}
+        </div>
+      )}
 
       {/* --- 輸入表單區 --- */}
       <div className="card">
